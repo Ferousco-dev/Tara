@@ -1,6 +1,6 @@
 # Attribution eval — scoring the channel binder against known turns
 
-**Status: implemented and tested offline (`tests/meet/test_attribution_eval.py`, 19 tests). It says nothing about a real Google Meet
+**Status: implemented and tested offline (`tests/meet/test_attribution_eval.py`, 20 tests). It says nothing about a real Google Meet
 call:** the fixtures are authored signals, not captured ones, and the page route the per-participant tap depends on is still
 unproven (see [SPEAKER_BINDING](SPEAKER_BINDING.md)).
 
@@ -73,34 +73,41 @@ degradation at a time, then the cases where the premise itself breaks. Numbers a
 | `duplicate_stream` | one voice on two elements (an echo) | one channel named, the copy stays unknown, leakage 0 |
 | `reconnect` | page replaced between two turns, channels renumbered | 2/2 turns, 35/39 named, leakage 0; two unknown frames after the reset |
 | `silent_channel` | a participant joined, muted, never spoke | never named, no tail to measure |
+| `channel_reuse` | Meet hands the same channel to a different person after a 1 s gap | 2/2 turns correct, 36/40 named, precision 1.000, leakage 0; the previous owner's name stops being claimable once their tile has been dark longer than `recent_ms`, at a cost of 4 unknown frames |
 | `late_self_name` | the bot's own name marker renders 600 ms late | **4 wrong frames** (the bot's name on a remote channel), then purged and correct |
-| `channel_reuse` | Meet hands the same channel to a different person after a 1 s gap | **5 wrong frames** (the previous owner's name), 2/2 turns eventually correct |
 | `stuck_glow` | the glow never leaves one tile while another person talks | **20 wrong frames** — the whole of the other person's turn |
 | `partial_glow` | one tile lit while two people talk, wrong channel fed first | **28 wrong frames**, leakage 1.000 — the lit name lands on the wrong channel |
 
 `duplicate_stream` reports completeness 1/2 by design: it contains two true turns because one voice arrived on two channels, and
 the copy staying unknown is the intended outcome (one tile, one channel), not a miss.
 
-**The gate.** For every fixture with an honest hint — truthful, late or flickering, on channels that are not reused by another
-person — `wrong_frames == 0`. The four `PINNED` fixtures are excluded from that gate and their damage is asserted exactly, so a
-change that helps or harms them is visible in the diff rather than hidden in an average.
+**The gate.** For every fixture with an honest hint — truthful, late or flickering, and including a channel Meet has since handed to
+a different person — `wrong_frames == 0`. The three `PINNED` fixtures are excluded from that gate and their damage is asserted
+exactly, so a change that helps or harms them is visible in the diff rather than hidden in an average. `channel_reuse` moved out of
+`PINNED` into the gate when the binder's recency rule made it honest; the 5 wrong frames it used to pin are kept in the suite as a
+config-level regression (`BinderConfig(recent_ms=None)`, the reference binder's behaviour).
 
-## Findings (measured, not fixed)
+## Findings (measured)
 
-1. **A reused channel keeps the previous owner for seconds.** Evidence is a decayed *count*, so after 2 s of speech the previous
-   person's score is around 13 and the new person needs ~2 s of their own speech to overtake it. In `channel_reuse` that is 5 wrong
-   frames (500 ms) after a 1 s gap; a longer previous turn makes it longer. Vexa's binder has the same shape and the same
-   behaviour. Candidate fixes (a saturating score cap, a recency requirement on the winning name, or counting loud-without-that-name
-   frames as negative evidence) each change `binding.py`'s contract, so they are recorded here for the owner rather than applied
-   inside an eval change.
+1. **A reused channel is released by the recency rule, and only after its window.** Evidence is a decayed *count*, so after 2 s of
+   speech the previous person's score is still around 13 — numerically the strongest on that channel. What stops it being claimed is
+   `binding.py`'s recency requirement: a name is claimable only while its tile is lit or was dark for at most `recent_ms` (800 ms).
+   After the fixture's 1 s gap the previous owner is stale, so the channel goes unknown for the new person's first 400 ms and then
+   names them: 4 unknown frames, 0 wrong. **The guarantee is bounded by that window, not absolute.** Holding the 2 s previous turn
+   fixed and shrinking the gap, the same scenario still carries the old name for 1 frame at 800 ms, 2 at 700 ms, 5 at 400 ms and 7 at
+   0–200 ms; at 900 ms and beyond it is silent instead of wrong. Disabling the rule (`BinderConfig(recent_ms=None)`) restores the 5
+   wrong frames this fixture used to pin, which is why
+   `test_the_reused_channel_leak_returns_when_the_recency_rule_is_disabled` keeps that comparison in the suite. A saturating score cap
+   or counting loud-without-that-name frames as negative evidence would make sub-window handovers safe too; both change `binding.py`'s
+   contract, so they remain recorded for the owner rather than applied inside an eval change.
 2. **A glow that sticks to one tile cannot be detected from inside.** The premise is that the lit tile tracks the channel's own
    speaker; when it does not, the binder confidently publishes the lit name for the whole interval (`stuck_glow`).
 3. **A glow that misses one of two simultaneous voices is order-dependent.** Whichever channel the event loop feeds first claims the
    lit name; `partial_glow` puts the wrong person first, so the pinned 100 % leakage is the honest worst case, not the lucky one.
 4. **A late self name leaks for as long as it is late.** The purge on arrival is correct, but the frames before it carry the bot's
    name on a remote channel (400 ms in the fixture).
-5. **Honest hints cost unknown frames, not wrong ones.** Overlap costs 15/70 frames, 700 ms turns 11/42, a 300 ms glow lag 5/30.
-   A 100 ms flicker costs nothing.
+5. **Honest hints cost unknown frames, not wrong ones.** Overlap costs 15/70 frames, 700 ms turns 11/42, a 300 ms glow lag 5/30, a
+   reused channel 4/40 once the previous owner is stale. A 100 ms flicker costs nothing.
 
 ## How to run it
 

@@ -5,7 +5,7 @@ The truth is authored by hand and never derived from the binder's output. Glow i
 (the ideal capture) unless a fixture deliberately distorts it — that is the whole point of the ladder: the hint is allowed to be
 late, to flicker, to lie or to be absent, and the binder is judged on what it does about it.
 
-Scenario order is the ladder: ideal capture first, then one realistic degradation at a time, then the two cases where the premise
+Scenario order is the ladder: ideal capture first, then one realistic degradation at a time, then the cases where the premise
 itself breaks and the failure is pinned instead of hidden.
 """
 from __future__ import annotations
@@ -119,7 +119,9 @@ DUPLICATE_STREAM = Scenario(
 
 CHANNEL_REUSE = Scenario(
     name="channel_reuse",
-    turns=_turns(Turn("Alex", 1, 0, 2000), Turn("Sam", 1, 3000, 5000)),   # Meet hands the same transport channel to somebody else
+    # Meet hands the same transport channel to somebody else. The 1 s gap is wider than the binder's recency window
+    # (`binding.DEFAULT_RECENT_MS`, 800 ms), so the previous owner's evidence is stale by the time the new person speaks.
+    turns=_turns(Turn("Alex", 1, 0, 2000), Turn("Sam", 1, 3000, 5000)),
     glow=glow_from_turns(_turns(Turn("Alex", 1, 0, 2000), Turn("Sam", 1, 3000, 5000))),
     duration_ms=5500,
 )
@@ -164,10 +166,12 @@ PARTIAL_GLOW = Scenario(
     duration_ms=3500,
 )
 
-# The ladder as a whole. `channel_reuse`, `stuck_glow`, `partial_glow` and `late_self_name` are excluded from the zero-leak gate on
-# purpose: each is a case where the hint (or the channel numbering) breaks the binder's premise — a channel handed to a different
-# person, a glow that lies, a glow that misses one of two voices, a self name that has not rendered. The tests pin their actual
-# damage instead of pretending it cannot happen.
+# The ladder as a whole. The zero-leak gate covers every fixture with an honest hint — including `channel_reuse`, where Meet hands a
+# channel to somebody else: the binder's recency rule (`binding.BinderConfig.recent_ms`, 800 ms) stops a name being claimable once
+# its tile has been dark for longer than that, so the fixture's 1 s gap costs UNKNOWN frames instead of a wrong name.
+# `late_self_name`, `stuck_glow` and `partial_glow` stay outside the gate on purpose: each breaks the binder's premise — a self name
+# that has not rendered, a glow that lies, a glow that misses one of two voices — so the tests pin their actual damage there instead
+# of pretending it cannot happen.
 SAFE = (
     SOLO,
     CLEAN_TURNS,
@@ -178,7 +182,8 @@ SAFE = (
     DUPLICATE_STREAM,
     RECONNECT,
     SILENT_CHANNEL,
+    CHANNEL_REUSE,
 )
 
-PINNED = (LATE_SELF_NAME, CHANNEL_REUSE, STUCK_GLOW, PARTIAL_GLOW)
+PINNED = (LATE_SELF_NAME, STUCK_GLOW, PARTIAL_GLOW)
 ALL = SAFE + PINNED
