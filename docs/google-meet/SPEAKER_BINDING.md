@@ -26,12 +26,13 @@ Three rules keep it honest:
 - **One tile, one channel.** A tile may be claimed by only one channel; the rest stay unknown rather than sharing a name.
 
 ## What Tara does differently from the reference
-Tara's implementation is derived from Vexa's `GmeetChannelBinder` (see [Where this comes from](#where-this-comes-from)), with two deliberate, stricter rules. Both are about refusing to answer:
+Tara's implementation is derived from Vexa's `GmeetChannelBinder` (see [Where this comes from](#where-this-comes-from)), with three deliberate, stricter rules. All three are about refusing to answer:
 
 | Rule | Vexa | Tara | Why |
 |---|---|---|---|
 | Near-tie between two names | The highest score wins | **Margin**: the best name must lead the runner-up by `margin` (default 1.5×), otherwise unknown | Two names fitting a channel about equally is exactly the leak case; a small lead is not evidence |
 | Two channels correlate with the same tile equally | Only a *strictly greater* other channel blocks the claim, so an exact tie lets the first caller win | An **equal** score also blocks it (`>=`), so an exact tie claims nobody | Deterministic, and it never breaks a tie by calling order |
+| A name whose tile is no longer lit | Decayed agreement stays claimable, so a channel Meet hands to somebody else keeps the previous owner | **Recency**: a name is claimable only while its tile is lit, or was dark for at most `recent_ms` (default 800 ms) | A channel's old owner is not evidence about its new one; `recent_ms=None` restores the reference behaviour |
 
 Everything else follows the reference: `tau_ms` 2500, `loud_threshold` 0.02 peak amplitude, `min_score` 2.5, the sticky self name, and purging agreements when the self name arrives late.
 
@@ -108,10 +109,10 @@ With `--record`, each channel is written to its own WAV (`...-room-ch1.wav`, `..
 - the page reports the self name `Tara` and at least one connected channel.
 
 ## How it is scored
-The binder is measured against hand-authored ground truth by the attribution ladder in [ATTRIBUTION_EVAL](ATTRIBUTION_EVAL.md): 13 replay fixtures (solo, clean turns, overlap, rapid switches, glow lag, glow flicker, a duplicated stream, a reconnect, a muted channel, a late self name, a reused channel, a stuck glow, a glow that misses a voice) driven through the real `ChannelBinder` on a virtual clock, scored for completeness, leakage (a wrong name) and attribution precision. For every fixture with an honest hint, leakage is **zero**: a late or flickering glow costs unknown frames, never a wrong name.
+The binder is measured against hand-authored ground truth by the attribution ladder in [ATTRIBUTION_EVAL](ATTRIBUTION_EVAL.md): 13 replay fixtures (solo, clean turns, overlap, rapid switches, glow lag, glow flicker, a duplicated stream, a reconnect, a muted channel, a late self name, a reused channel, a stuck glow, a glow that misses a voice) driven through the real `ChannelBinder` on a virtual clock, scored for completeness, leakage (a wrong name) and attribution precision. For every fixture with an honest hint — including a channel Meet reuses for a different person after the recency window — leakage is **zero**: a late, flickering or re-owned channel costs unknown frames, never a wrong name.
 
-## Known limits (measured, not fixed)
-- **A channel reused by a different person keeps the previous owner for seconds.** Evidence is a decayed count, so a long turn leaves a high score behind; after a 1 s gap the new person is called the old name for 500 ms in the fixture, and longer after a longer turn. Vexa's binder has the same behaviour. The ladder pins the number (`channel_reuse`); a fix would change this module's contract and is not part of the eval.
+## Known limits (measured)
+- **A channel reused by a different person is released only after the recency window, and not at all inside it.** Once the previous owner's tile has been dark for longer than `recent_ms` (800 ms) their decayed evidence can no longer be claimed, so the ladder's 1 s gap costs 4 unknown frames and zero wrong names. Inside the window it still leaks, because the old score remains the strongest signal: holding the same 2 s previous turn, a 800 ms handover gap carries the old name for 1 frame, 700 ms for 2, 400 ms for 5 and 0–200 ms for 7, and `BinderConfig(recent_ms=None)` restores the 5 wrong frames the fixture used to pin. Making sub-window handovers safe needs a saturating score cap or negative evidence for loud-without-that-name frames, which would change this module's contract; the ladder records the numbers instead of hiding them.
 - **A glow that sticks to one tile mislabels the other speaker for the whole interval**, and a glow that misses one of two simultaneous voices lands on whichever channel the event loop feeds first. Both are pinned in the ladder; neither can be detected from inside the binder, because both break its premise rather than its arithmetic.
 - **A late self name leaks for as long as it is late** (400 ms in the fixture) before the purge on arrival collapses it.
 

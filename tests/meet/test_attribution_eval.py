@@ -1,11 +1,13 @@
 """The attribution ladder: every fixture replayed through the real binder, scored against hand-authored truth.
 
 The point is not that the binder is good at one meeting. It is that the ladder states, fixture by fixture, what a change to the
-binder is allowed to do: an honest hint may cost UNKNOWN frames but must never produce a wrong name; a hint that lies (or a channel
-handed to a different person) has its damage pinned so a change is visible. See docs/google-meet/ATTRIBUTION_EVAL.md.
+binder is allowed to do: an honest hint may cost UNKNOWN frames but must never produce a wrong name, including when Meet hands a
+channel to a different person; a hint that lies, misses one of two voices, or names the bot late has its damage pinned so a change
+is visible. See docs/google-meet/ATTRIBUTION_EVAL.md.
 """
 import pytest
 
+from tara.meet.binding import BinderConfig
 from tara.meet.eval import Frame, GlowEdge, Scenario, Turn, replay, score
 from tests.meet.attribution_fixtures import (
     ALL,
@@ -40,7 +42,8 @@ def test_every_fixture_replays_byte_identically_twice():
 
 
 def test_an_honest_hint_never_names_the_wrong_person():
-    """The hard gate: a truthful, late or flickering glow may leave a channel unknown, never wrong."""
+    """The hard gate: a truthful, late or flickering glow may leave a channel unknown, never wrong — and that also has to hold for a
+    channel Meet has since handed to somebody else, which the recency rule makes true beyond its 800 ms window."""
     for scenario in SAFE:
         result = score(scenario, replay(scenario))
         assert result.wrong_frames == 0, f"{result.line} {result.wrong_names}"
@@ -124,6 +127,32 @@ def test_a_muted_channel_is_never_named():
     assert score(SILENT_CHANNEL, frames).silent_named >= 0                  # a channel nobody spoke on has no tail to measure
 
 
+def test_a_reused_channel_is_released_once_the_previous_owner_goes_stale():
+    """Meet hands the channel to somebody else after a 1 s gap. The recency rule (`BinderConfig.recent_ms`, 800 ms) stops a name being
+    claimable once its tile has been dark for longer than that, so Sam's first frame is UNKNOWN rather than the previous owner, and
+    Sam is named once his own evidence passes the floor. Refusing to guess costs four unknown frames; it never states a wrong name.
+    This fixture used to be pinned as damage, which is exactly what the rule changed."""
+    frames = replay(CHANNEL_REUSE)
+    first_sam = next(f for f in frames if f.truth == "Sam")
+    assert first_sam.answer is None                                         # unknown, never the previous owner
+    assert all(f.answer != "Alex" for f in frames if f.truth == "Sam")      # his name never lands on Sam's turn
+    result = score(CHANNEL_REUSE, frames)
+    assert result.wrong_names == () and result.wrong_frames == 0
+    assert (result.completeness, result.correct_turn_rate, result.precision) == (1.0, 1.0, 1.0)
+    assert result.unknown_frames == 4                                       # Sam's first 400 ms, the price of not guessing
+    assert (result.repaints, result.dropouts, result.silent_named) == (0, 0, 14)
+
+
+def test_the_reused_channel_leak_returns_when_the_recency_rule_is_disabled():
+    """The rule is load-bearing, not incidental. `recent_ms=None` restores the reference binder's behaviour, and the same fixture
+    then reproduces what the ladder used to pin: 5 wrong frames where Sam is called Alex. Dropping or shortening the rule therefore
+    shows up twice — as wrong names in the gate above, and as this exact count here."""
+    result = score(CHANNEL_REUSE, replay(CHANNEL_REUSE, BinderConfig(recent_ms=None)))
+    assert result.wrong_names == (("Sam", "Alex"),)
+    assert result.wrong_frames == 5
+    assert (result.correct_turns, result.turns) == (2, 2)                   # it does recover, and never names a third person
+
+
 # ---- pinned damage: the premise breaks, so the failure is measured rather than hidden --------------------------------
 def test_the_self_name_arriving_late_costs_only_the_frames_before_it():
     """The marker renders late, so the bot's own glow can bind a remote channel until it arrives; the binder then purges it."""
@@ -133,19 +162,6 @@ def test_the_self_name_arriving_late_costs_only_the_frames_before_it():
     after = [f for f in replay(LATE_SELF_NAME) if f.ts_ms >= 600]
     assert all(f.answer != "Tara" for f in after)
     assert next(f.answer for f in after if f.answer is not None) == "Alex"
-
-
-def test_a_reused_channel_can_keep_the_previous_owner_for_seconds():
-    """Known limitation, inherited from the reference binder: evidence is a decayed count, so a channel Meet hands to somebody
-    else keeps the previous person's name until the new person's evidence overtakes the old high-water mark. Pinned, not fixed:
-    the numbers below are what the ladder says today (500 ms of wrong name after a 1 s gap)."""
-    frames = replay(CHANNEL_REUSE)
-    first_sam = next(f for f in frames if f.truth == "Sam")
-    assert first_sam.answer == "Alex"
-    result = score(CHANNEL_REUSE, frames)
-    assert result.wrong_names == (("Sam", "Alex"),)
-    assert result.wrong_frames == 5
-    assert result.correct_turns == 2                                        # it does recover, and never names a third person
 
 
 def test_a_stuck_glow_mislabels_the_channel_it_sticks_to():
